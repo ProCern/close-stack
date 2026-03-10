@@ -1,11 +1,11 @@
 rockspec_format = '3.0'
 
 package = "close-stack"
-version = "1.0.0-1"
+version = "1.0.1-1"
 
 source = {
   url = "git+https://github.com/ProCern/close-stack.git",
-  tag = "v1.0.0",
+  tag = "v1.0.1",
 }
 
 description = {
