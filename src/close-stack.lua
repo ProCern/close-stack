@@ -27,7 +27,8 @@ local function unwind(stack, index, err)
     end
   end
 
-  -- Unrolled to 8 closers per stack frame to increase effective capacity.
+  -- Unrolled to 8 closers per stack frame to increase effective capacity and
+  -- performance.
   local closer_0 <close> = stack[index]
   local closer_1 <close> = stack[index + 1]
   local closer_2 <close> = stack[index + 2]
