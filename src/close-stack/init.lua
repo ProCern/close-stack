@@ -18,7 +18,9 @@ function metatable:__len()
 end
 
 function metatable:__gc()
-  if #self._stack > 0 or next(self._map) ~= nil then
+  -- Truthy map entries are pushed onto the stack, so #_stack covers them too;
+  -- purely-falsy map entries are not resources and need no warning.
+  if #self._stack > 0 then
     warn('close stack was garbage collected with items in it before it was closed!')
   end
 end
@@ -27,72 +29,19 @@ function metatable:__newindex()
   error('You can not create entries in the close stack directly. Use the methods provided.')
 end
 
--- Advance one entry through a map. Given a key (which must be non-nil), returns
--- the value stored at that key and the following key (or nil when the iteration
--- is exhausted). A nil key short-circuits to (nil, nil) so it is safe to call on
--- a slot that has already run off the end of the map.
---- @param map {[any]: any}
---- @param key any
---- @return any value, any next_key
-local function step(map, key)
-  if key == nil then
-    return nil, nil
-  end
-  return map[key], next(map, key)
-end
-
--- Unwind an unordered map of closeables, invoking each value's closer. Unlike
--- the ordered stack there is no meaningful index arithmetic, so we walk the map
--- with `next`, threading the current key through the recursion. Because the map
--- is unordered, the closing order among its values is unspecified.
---- @param map {[any]: any}
---- @param key any The next key to close, or nil when the map is exhausted.
+-- Unwind the stack, causing closers to be invoked in reverse order.
+--- @param stack any[]
+--- @param index integer
 --- @param err? any
-local function unwind_map(map, key, err)
-  -- The deepest layer: no more keys to close, so re-raise any pending error so
-  -- that it propagates back up through every closer we have opened.
-  if key == nil then
+local function unwind(stack, index, err)
+  -- Check for the stack index first to speed up no-ops from pop_all.
+  if not stack[index] then
     if err ~= nil then
-      -- We re-raise any error inside the map so that the closers see the
+      -- We re-raise any error inside the stack so that the closers see the
       -- error in their `__close` method and can behave accordingly.
       error(err)
     end
     return
-  end
-
-  -- Unrolled to 16 closers per stack frame, mirroring `unwind`. Each `step`
-  -- binds one value to a `<close>` local and advances to the following key; once
-  -- the map is exhausted the remaining slots receive nil (which Lua ignores).
-  local value_0 <close>, key_1 = step(map, key)
-  local value_1 <close>, key_2 = step(map, key_1)
-  local value_2 <close>, key_3 = step(map, key_2)
-  local value_3 <close>, key_4 = step(map, key_3)
-  local value_4 <close>, key_5 = step(map, key_4)
-  local value_5 <close>, key_6 = step(map, key_5)
-  local value_6 <close>, key_7 = step(map, key_6)
-  local value_7 <close>, key_8 = step(map, key_7)
-  local value_8 <close>, key_9 = step(map, key_8)
-  local value_9 <close>, key_10 = step(map, key_9)
-  local value_10 <close>, key_11 = step(map, key_10)
-  local value_11 <close>, key_12 = step(map, key_11)
-  local value_12 <close>, key_13 = step(map, key_12)
-  local value_13 <close>, key_14 = step(map, key_13)
-  local value_14 <close>, key_15 = step(map, key_14)
-  local value_15 <close>, key_16 = step(map, key_15)
-  return unwind_map(map, key_16, err)
-end
-
--- Unwind the stack, causing closers to be invoked in reverse order.
---- @param stack any[]
---- @param index integer
---- @param map {[any]: any}
---- @param err? any
-local function unwind(stack, index, map, err)
-  -- Check for the stack index first to speed up no-ops from pop_all.
-  if not stack[index] then
-    -- The deepest layer of the ordered stack hands off to the unordered map,
-    -- which also takes care of re-raising any pending error.
-    return unwind_map(map, next(map), err)
   end
 
   -- Unrolled to 16 closers per stack frame to increase effective capacity and
@@ -113,7 +62,7 @@ local function unwind(stack, index, map, err)
   local closer_13 <close> = stack[index + 13]
   local closer_14 <close> = stack[index + 14]
   local closer_15 <close> = stack[index + 15]
-  return unwind(stack, index + 16, map, err)
+  return unwind(stack, index + 16, err)
 end
 
 --- @param err? any
@@ -148,13 +97,17 @@ end
 
 --- Store a closeable in the keyed map under `key` and return it.
 ---
---- Entries are effectively const, mirroring the `<close>` values they become:
---- once a key holds a real (truthy) closeable you can not reset or unset it, so
---- an owned resource can never be silently dropped. Attempting to do so raises an
---- error. A falsy current value (`false`, or absent) is not a real resource, so
---- it may be freely overwritten. A `nil` or `false` closeable on an empty key is
---- a harmless no-op; `false` values are stored as-is (and so show up in
---- `map_pairs`), consistent with Lua ignoring them as to-be-closed values.
+--- Because map entries are const once set (see below), a `map_set` is really an
+--- append: the closeable is `push`ed onto the same ordered stack as everything
+--- else, so it closes in the shared LIFO order at the point where it was set. The
+--- map itself just indexes it by key for later lookup via `map_get`/`map_pairs`.
+---
+--- Entries are const: once a key holds a real (truthy) closeable you can not
+--- reset or unset it, so an owned resource can never be silently dropped.
+--- Attempting to do so raises an error. A falsy current value (`false`, or
+--- absent) is not a real resource, so it may be freely overwritten. A `nil` or
+--- `false` closeable stores nothing on the stack but is still recorded for
+--- lookup/iteration, consistent with Lua ignoring them as to-be-closed values.
 ---
 --- @param key any
 --- @param closeable? any
@@ -168,7 +121,7 @@ function methods:map_set(key, closeable)
     error('You can not overwrite an existing map entry. Map entries are const once set.')
   end
   map[key] = closeable
-  return closeable
+  return self:push(closeable)
 end
 
 --- Get the closeable stored under `key`, or nil if there is none.
@@ -181,15 +134,9 @@ end
 --- Return a stateful iterator over the map, yielding (key, closeable) pairs. The
 --- underlying table is not exposed, so it can not be mutated through the
 --- iterator.
---- @return fun(): any, any
+--- @return fun(...: any): any, any, ...
 function methods:map_pairs()
-  local map <const> = self._map
-  local key
-  return function()
-    local value
-    key, value = next(map, key)
-    return key, value
-  end
+  return pairs(self._map)
 end
 
 --- Return the `#` length of the underlying map table. As with any Lua table,
@@ -205,10 +152,9 @@ end
 --- @param err? any
 function methods:close(err)
   local stack <const> = self._stack
-  local map <const> = self._map
   self._stack = {}
   self._map = {}
-  return unwind(stack, 1, map, err)
+  return unwind(stack, 1, err)
 end
 
 --- Transfers the stack and map to a new close stack and returns it, leaving this
@@ -218,8 +164,10 @@ function methods:pop_all()
   local new <const> = setmetatable({
     _stack = self._stack,
     _map = self._map,
+    map = false,
   }, metatable)
-  rawset(new, 'map', make_map_proxy(new))
+  new.map = make_map_proxy(new)
+
   self._stack = {}
   self._map = {}
   return new
@@ -231,9 +179,12 @@ function M.new()
   local self <const> = setmetatable({
     _stack = {},
     _map = {},
+
+    -- bypass the __newindex guard and make sure the table is exactly the right size.
+    map = false,
   }, metatable)
-  -- rawset bypasses the __newindex guard; the proxy is trusted internal state.
-  rawset(self, 'map', make_map_proxy(self))
+  self.map = make_map_proxy(self)
+
   return self
 end
 

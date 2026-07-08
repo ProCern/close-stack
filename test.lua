@@ -359,7 +359,7 @@ end)
 ----------------------------------------------------------------------
 print("\n--- __len ---")
 
-test("__len tracks pushes, callbacks, and close", function()
+test("__len tracks pushes, callbacks, map_set, and close", function()
   local s <close> = close_stack.new()
   assert_eq(#s, 0)
   s:push(recorder({}, "a"))
@@ -368,6 +368,12 @@ test("__len tracks pushes, callbacks, and close", function()
   assert_eq(#s, 2)
   s:callback(function() end)
   assert_eq(#s, 3)
+  -- map_set is an append onto the stack, so a truthy entry counts toward #s...
+  s:map_set("k", recorder({}, "c"))
+  assert_eq(#s, 4)
+  -- ...but a falsy map entry pushes nothing.
+  s:map_set("empty", false)
+  assert_eq(#s, 4)
   s:close()
   assert_eq(#s, 0)
 end)
@@ -659,16 +665,21 @@ test("map values receive the error on error unwinding", function()
   end
 end)
 
-test("map values close before stack values", function()
+test("map values interleave with pushes in LIFO close order", function()
   local log = {}
   local s <close> = close_stack.new()
-  s:push(recorder(log, "stack"))
-  s:map_set("m", recorder(log, "map"))
+  -- map_set is an append onto the shared stack, so the close order is a single
+  -- LIFO across both pushes and map_sets, at their insertion points.
+  s:push(recorder(log, "push-1"))
+  s:map_set("m1", recorder(log, "map-2"))
+  s:push(recorder(log, "push-3"))
+  s:map_set("m2", recorder(log, "map-4"))
   s:close()
-  assert_eq(#log, 2)
-  -- the map is the deepest layer, so its values close first.
-  assert_eq(log[1].name, "map")
-  assert_eq(log[2].name, "stack")
+  assert_eq(#log, 4)
+  assert_eq(log[1].name, "map-4")
+  assert_eq(log[2].name, "push-3")
+  assert_eq(log[3].name, "map-2")
+  assert_eq(log[4].name, "push-1")
 end)
 
 test("map supports arbitrary key types including false", function()
@@ -720,7 +731,7 @@ test("empty map with error re-raises it", function()
   assert_eq(err, sentinel)
 end)
 
-test("a thrower in the map propagates to stack closers", function()
+test("a thrower set in the map propagates like any pushed closer", function()
   local log = {}
   local thrown = {}
   local ok, err = pcall(function()
@@ -731,10 +742,10 @@ test("a thrower in the map propagates to stack closers", function()
   end)
   assert_eq(ok, false)
   assert_eq(err, thrown)
-  -- the map thrower fires first (deepest), with nil error...
+  -- the thrower was set last, so it closes first (LIFO) with nil error...
   assert_eq(log[1].name, "map-thrower")
   assert_eq(log[1].err, nil)
-  -- ...then the stack closer sees the replacement error.
+  -- ...then the earlier-pushed closer sees the replacement error.
   assert_eq(log[2].name, "stack")
   assert_eq(log[2].err, thrown)
 end)

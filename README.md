@@ -149,16 +149,19 @@ this behavior — there is no back door. It only supports data access (index,
 assign, `#`, `pairs`); the `map_*` methods live on the close stack itself, not on
 the proxy.
 
-The map is closed as the *deepest* layer of unwinding: all map values are closed
-before any of the ordered stack's values. Because a map is unordered, the
-closing order **among the map's own values is unspecified** — do not rely on it.
-If you need ordering between two resources, use `push`.
+Because entries are const, a `map_set` is really just an append: the closeable is
+pushed onto the same ordered stack as `push`, and the map is only a keyed index
+for looking it up later. So map entries close in the **same LIFO order** as
+everything else, at the point where they were set — a `push`, a `map_set`, and
+another `push` all close last-in-first-out, interleaved. There is no separate
+"map phase"; the two APIs are just two ways to add to one close order (and a
+truthy `map_set` therefore counts toward `#stack`).
 
-Map values participate in error propagation exactly like stack values: they
+Map values participate in error propagation exactly like pushed values: they
 receive the in-flight error in their `__close` metamethod, and an error thrown by
-a map closer replaces the propagating error for everything closed afterward
-(i.e. the whole ordered stack). `pop_all` transfers the map along with the stack,
-and the map is emptied on close.
+a map closer replaces the propagating error for everything closed afterward.
+`pop_all` transfers the map along with the stack, and the map is emptied on
+close.
 
 ### Error handling
 
@@ -264,16 +267,16 @@ for key, closeable in pairs(stack.map) do end
 
 ### `stack:map_set(key, closeable)`
 
-Stores a closeable in the keyed map under `key` and returns it. All map values
-are closed when the stack is closed, *before* any value on the ordered stack, in
-an **unspecified order**. The map is emptied on close and transferred by
-`pop_all`.
+Stores a closeable in the keyed map under `key` and returns it. A `map_set` is an
+append: the closeable is pushed onto the ordered stack (so it closes in the
+shared LIFO order and counts toward `#stack`), and the map indexes it by key for
+lookup. The map is emptied on close and transferred by `pop_all`.
 
 Entries are const once set: if `key` already holds a real (truthy) closeable,
 `map_set` raises an error rather than overwriting or unsetting it. A `nil` or
-`false` value is treated as "nothing to store" — a no-op on an empty key, and
-allowed to overwrite a key that only holds a falsy value. `false` is stored as-is
-(and appears in `map_pairs`). A `nil` `key` raises an error.
+`false` value is treated as "nothing to store" — a no-op push, allowed to
+overwrite a key that only holds a falsy value. `false` is stored in the index
+as-is (and appears in `map_pairs`). A `nil` `key` raises an error.
 
 ```lua
 stack:map_set('log', open_logfile(path))
@@ -319,9 +322,10 @@ or have more items pushed onto it.
 
 ### `#stack`
 
-Returns the number of entries currently in the *ordered stack*. The keyed map is
-separate and does not contribute to this length; use `stack:map_len()` or
-`stack:map_pairs()` to inspect the map.
+Returns the number of entries currently in the ordered stack. Since `map_set`
+appends to that stack, truthy map entries are included in this count. To inspect
+the keyed map's own index specifically, use `stack:map_len()` or
+`stack:map_pairs()`.
 
 ### Using as a `<close>` variable
 
@@ -339,9 +343,10 @@ Direct field assignment on a close stack raises an error. Use the methods above.
 
 ### `__gc` warning
 
-If a close stack is garbage collected while it still has entries in either the
-ordered stack or the keyed `map` (i.e. it was never closed), a warning is emitted
-via `warn()`.
+If a close stack is garbage collected while it still has entries on the stack
+(i.e. it was never closed), a warning is emitted via `warn()`. Truthy map entries
+live on that stack too, so they are covered; a map index holding only falsy
+placeholders is not a leak and does not warn.
 
 ## Closing semantics
 
@@ -393,21 +398,21 @@ auto-closeable object. If you violate this, the stack will throw an error on
 close, and leak parts of its stack.
 
 The ordered stack is unwound 16 closers per function frame (an unrolling that
-raises the effective capacity and reduces recursion overhead). The keyed map is
-unwound the same way: because it is an unordered table rather than a sequence, it
-cannot be walked by index, so its unwinder threads a key through `next` and binds
-up to 16 values per frame to `<close>` locals, recursing on the key that follows
-the sixteenth. Slots past the end of the map receive `nil`, which Lua's
-to-be-closed machinery simply ignores. The map is unwound as the deepest layer,
-so its values close before the ordered stack's — and, being unordered, in no
-guaranteed order among themselves.
+raises the effective capacity and reduces recursion overhead). The keyed map does
+not need its own unwinder: because entries are const once set, `map_set` can just
+`push` the closeable onto that same stack, so map values close through the exact
+same machinery and in the same LIFO order as everything else. The map's own table
+is purely a keyed index for `map_get`/`map_pairs`/`map_len` lookups, and holds no
+closing responsibility of its own.
 
-The map is kept as private state reached only through `map_set`/`map_get`/
+The index is kept as private state reached only through `map_set`/`map_get`/
 `map_pairs`/`map_len`, never as a raw table. This is deliberate: a `<close>`
 value is also `<const>`, and the whole close stack is built to honor that — you
 can add resources but never quietly remove an individual one. A raw public table
 would let a caller `delete` or overwrite an owned closeable and leak it, so
-`map_set` enforces the const-once-set rule instead.
+`map_set` enforces the const-once-set rule instead. (The const rule is also
+exactly what makes the append trick sound: since an entry can never be replaced
+or removed, pushing it once is enough.)
 
 The public `stack.map` field is a proxy (see `src/close-stack/_map-proxy.lua`),
 not the underlying table: a small table carrying a backreference to its owning
