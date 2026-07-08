@@ -1,5 +1,4 @@
-package.path = 'lua/?.lua;' .. package.path
-local close_stack = require('close-stack').close_stack
+local close_stack = require('close-stack')
 
 local passed, failed = 0, 0
 
@@ -45,7 +44,7 @@ print("--- Close order ---")
 
 test("closeables fire in LIFO order", function()
   local log = {}
-  local s <close> = close_stack()
+  local s <close> = close_stack.new()
   s:push(recorder(log, "first"))
   s:push(recorder(log, "second"))
   s:push(recorder(log, "third"))
@@ -58,7 +57,7 @@ end)
 
 test("callbacks fire in LIFO order", function()
   local log = {}
-  local s <close> = close_stack()
+  local s <close> = close_stack.new()
   s:callback(function() log[#log + 1] = "first" end)
   s:callback(function() log[#log + 1] = "second" end)
   s:callback(function() log[#log + 1] = "third" end)
@@ -71,7 +70,7 @@ end)
 
 test("mixed closeables and callbacks fire in LIFO order", function()
   local log = {}
-  local s <close> = close_stack()
+  local s <close> = close_stack.new()
   s:push(recorder(log, "closer-1"))
   s:callback(function() log[#log + 1] = { name = "callback-2" } end)
   s:push(recorder(log, "closer-3"))
@@ -89,7 +88,7 @@ test("all closers fire on error unwinding", function()
   local log = {}
   local sentinel = {}
   local ok, err = pcall(function()
-    local s <close> = close_stack()
+    local s <close> = close_stack.new()
     s:push(recorder(log, "A"))
     s:push(recorder(log, "B"))
     s:push(recorder(log, "C"))
@@ -107,7 +106,7 @@ test("all callbacks fire on error unwinding", function()
   local log = {}
   local sentinel = {}
   local ok, err = pcall(function()
-    local s <close> = close_stack()
+    local s <close> = close_stack.new()
     s:callback(function() log[#log + 1] = "A" end)
     s:callback(function() log[#log + 1] = "B" end)
     s:close(sentinel)
@@ -123,7 +122,7 @@ test("closers receive the error value on error unwinding (sentinel table)", func
   local log = {}
   local sentinel = {}
   pcall(function()
-    local s <close> = close_stack()
+    local s <close> = close_stack.new()
     s:push(recorder(log, "A"))
     s:push(recorder(log, "B"))
     s:push(recorder(log, "C"))
@@ -137,7 +136,7 @@ end)
 
 test("closers receive nil on normal close", function()
   local log = {}
-  local s <close> = close_stack()
+  local s <close> = close_stack.new()
   s:push(recorder(log, "A"))
   s:push(recorder(log, "B"))
   s:close()
@@ -154,7 +153,7 @@ test("closer error during normal close propagates to remaining closers", functio
   local log = {}
   local thrown = {}
   local ok, err = pcall(function()
-    local s <close> = close_stack()
+    local s <close> = close_stack.new()
     s:push(recorder(log, "A"))
     s:push(recorder(log, "B"))
     s:push(thrower(log, "C", thrown))
@@ -176,7 +175,7 @@ test("middle closer error propagates to earlier-pushed closers only", function()
   local log = {}
   local thrown = {}
   local ok, err = pcall(function()
-    local s <close> = close_stack()
+    local s <close> = close_stack.new()
     s:push(recorder(log, "A"))
     s:push(thrower(log, "B", thrown))
     s:push(recorder(log, "C"))
@@ -203,7 +202,7 @@ test("closer error during error close replaces the original", function()
   local original = {}
   local replacement = {}
   local ok, err = pcall(function()
-    local s <close> = close_stack()
+    local s <close> = close_stack.new()
     s:push(recorder(log, "A"))
     s:push(thrower(log, "C", replacement))
     s:close(original)
@@ -223,7 +222,7 @@ test("callback error propagates to remaining closers", function()
   local log = {}
   local thrown = {}
   local ok, err = pcall(function()
-    local s <close> = close_stack()
+    local s <close> = close_stack.new()
     s:push(recorder(log, "A"))
     s:callback(function() error(thrown) end)
     s:push(recorder(log, "C"))
@@ -242,28 +241,28 @@ end)
 print("\n--- push and callback ---")
 
 test("push returns the closeable", function()
-  local s <close> = close_stack()
+  local s <close> = close_stack.new()
   local obj = recorder({}, "x")
   assert_eq(s:push(obj), obj)
   s:close()
 end)
 
 test("push(nil) returns nil and does not add to stack", function()
-  local s <close> = close_stack()
+  local s <close> = close_stack.new()
   assert_eq(s:push(nil), nil)
   assert_eq(#s, 0)
   s:close()
 end)
 
 test("push(false) returns false and does not add to stack", function()
-  local s <close> = close_stack()
+  local s <close> = close_stack.new()
   assert_eq(s:push(false), false)
   assert_eq(#s, 0)
   s:close()
 end)
 
 test("callback returns the function", function()
-  local s <close> = close_stack()
+  local s <close> = close_stack.new()
   local fn = function() end
   assert_eq(s:callback(fn), fn)
   s:close()
@@ -271,7 +270,7 @@ end)
 
 test("callback passes stored arguments on close", function()
   local captured
-  local s <close> = close_stack()
+  local s <close> = close_stack.new()
   s:callback(function(a, b, c)
     captured = { a, b, c }
   end, 1, "two", 3)
@@ -283,7 +282,7 @@ end)
 
 test("callback preserves nil holes in arguments", function()
   local n
-  local s <close> = close_stack()
+  local s <close> = close_stack.new()
   s:callback(function(...)
     n = select('#', ...)
   end, nil, nil, 3)
@@ -296,7 +295,7 @@ print("\n--- Large batch ---")
 
 test("100 closeables close in LIFO order", function()
   local log = {}
-  local s <close> = close_stack()
+  local s <close> = close_stack.new()
   for i = 1, 100 do
     s:push(recorder(log, i))
   end
@@ -312,7 +311,7 @@ test("100 closeables all receive error on error unwinding", function()
   local log = {}
   local sentinel = {}
   pcall(function()
-    local s <close> = close_stack()
+    local s <close> = close_stack.new()
     for i = 1, 100 do
       s:push(recorder(log, i))
     end
@@ -329,7 +328,7 @@ test("100 items with a thrower mid-batch propagates correctly", function()
   local log = {}
   local thrown = {}
   local ok, err = pcall(function()
-    local s <close> = close_stack()
+    local s <close> = close_stack.new()
     for i = 1, 50 do
       s:push(recorder(log, i))
     end
@@ -361,7 +360,7 @@ end)
 print("\n--- __len ---")
 
 test("__len tracks pushes, callbacks, and close", function()
-  local s <close> = close_stack()
+  local s <close> = close_stack.new()
   assert_eq(#s, 0)
   s:push(recorder({}, "a"))
   assert_eq(#s, 1)
@@ -377,7 +376,7 @@ end)
 print("\n--- __newindex ---")
 
 test("direct assignment to close stack errors", function()
-  local s <close> = close_stack()
+  local s <close> = close_stack.new()
   local ok, err = pcall(function() s.foo = "bar" end)
   assert_eq(ok, false)
   assert(tostring(err):find("can not create entries"),
@@ -389,14 +388,14 @@ end)
 print("\n--- Empty and double close ---")
 
 test("closing empty stack is a no-op", function()
-  local s <close> = close_stack()
+  local s <close> = close_stack.new()
   s:close() -- should not error
 end)
 
 test("closing empty stack with error re-raises it", function()
   local sentinel = {}
   local ok, err = pcall(function()
-    local s <close> = close_stack()
+    local s <close> = close_stack.new()
     s:close(sentinel)
   end)
   assert_eq(ok, false)
@@ -405,7 +404,7 @@ end)
 
 test("second close is a no-op", function()
   local log = {}
-  local s <close> = close_stack()
+  local s <close> = close_stack.new()
   s:push(recorder(log, "A"))
   s:close()
   assert_eq(#log, 1)
@@ -416,7 +415,7 @@ end)
 test("manual close before <close> scope exit prevents double invocation", function()
   local log = {}
   do
-    local s <close> = close_stack()
+    local s <close> = close_stack.new()
     s:push(recorder(log, "A"))
     s:close()
     assert_eq(#log, 1)
@@ -429,7 +428,7 @@ print("\n--- pop_all ---")
 
 test("pop_all transfers items to new stack", function()
   local log = {}
-  local s <close> = close_stack()
+  local s <close> = close_stack.new()
   s:push(recorder(log, "A"))
   s:push(recorder(log, "B"))
   local s2 = s:pop_all()
@@ -443,7 +442,7 @@ end)
 
 test("pop_all leaves original empty", function()
   local log = {}
-  local s <close> = close_stack()
+  local s <close> = close_stack.new()
   s:push(recorder(log, "A"))
   local s2 = s:pop_all()
   s:close()
@@ -454,7 +453,23 @@ end)
 test("pop_all result works as <close>", function()
   local log = {}
   do
-    local s <close> = close_stack()
+    local s2 <close> = (function()
+      local s <close> = close_stack.new()
+      s:push(recorder(log, "A"))
+      s:push(recorder(log, "B"))
+      return s:pop_all()
+    end)()
+    assert_eq(#log, 0)
+  end
+  assert_eq(#log, 2)
+  assert_eq(log[1].name, "B")
+  assert_eq(log[2].name, "A")
+end)
+
+test("pop_all result works as <close>", function()
+  local log = {}
+  do
+    local s <close> = close_stack.new()
     s:push(recorder(log, "A"))
     s:push(recorder(log, "B"))
     local s2 <close> = s:pop_all()
@@ -469,7 +484,7 @@ test("pop_all result propagates error on error exit", function()
   local log = {}
   local sentinel = {}
   local ok, err = pcall(function()
-    local s <close> = close_stack()
+    local s <close> = close_stack.new()
     s:push(recorder(log, "A"))
     s:push(recorder(log, "B"))
     local s2 <close> = s:pop_all()
@@ -484,7 +499,7 @@ end)
 
 test("original stack can be reused after pop_all", function()
   local log = {}
-  local s <close> = close_stack()
+  local s <close> = close_stack.new()
   s:push(recorder(log, "old"))
   local s2 = s:pop_all()
   s:push(recorder(log, "new"))
@@ -502,7 +517,7 @@ print("\n--- as <close> variable ---")
 test("close stack as <close> fires closers on scope exit", function()
   local log = {}
   do
-    local s <close> = close_stack()
+    local s <close> = close_stack.new()
     s:push(recorder(log, "A"))
     s:push(recorder(log, "B"))
   end
@@ -515,7 +530,7 @@ test("close stack as <close> passes error to closers", function()
   local log = {}
   local sentinel = {}
   pcall(function()
-    local s <close> = close_stack()
+    local s <close> = close_stack.new()
     s:push(recorder(log, "A"))
     s:push(recorder(log, "B"))
     error(sentinel)
