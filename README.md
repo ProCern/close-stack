@@ -9,7 +9,7 @@ Requires Lua 5.4 or later (which introduced to-be-closed variables).
 ## Usage
 
 ```lua
-local close_stack = require('close-stack').close_stack
+local close_stack = require('close-stack')
 ```
 
 ### Basic resource management
@@ -20,7 +20,7 @@ value, so you can assign it to a `<close>` variable and let scope exit handle
 cleanup automatically.
 
 ```lua
-local s <close> = close_stack()
+local s <close> = close_stack.new()
 
 local file = s:push(io.open('/tmp/example.txt', 'w'))
 local conn = s:push(db.connect())
@@ -38,7 +38,7 @@ resources are cleaned up on error or early return. A second close is a no-op —
 the stack empties itself on the first close.
 
 ```lua
-local s <close> = close_stack()
+local s <close> = close_stack.new()
 s:push(resource_a)
 s:push(resource_b)
 
@@ -56,7 +56,7 @@ its place in the closing order. Unlike closeables, callbacks do not receive the
 error value.
 
 ```lua
-local s <close> = close_stack()
+local s <close> = close_stack.new()
 
 s:push(some_resource)
 s:callback(print, 'cleaning up...')
@@ -73,7 +73,7 @@ stack, and if everything succeeds, transfer ownership elsewhere.
 
 ```lua
 local function setup()
-  local s <close> = close_stack()
+  local s <close> = close_stack.new()
 
   local conn = s:push(db.connect())
   local stmt = s:push(conn:prepare('...'))
@@ -98,8 +98,8 @@ means closers can make decisions based on whether the scope exited normally or
 due to an error.
 
 ```lua
-local commit_guard_mt = {}
-function commit_guard_mt:__close(err)
+local transaction_metatable = {}
+function transaction_metatable:__close(err)
   if err then
     self.conn:rollback()
   else
@@ -107,9 +107,14 @@ function commit_guard_mt:__close(err)
   end
 end
 
-local s <close> = close_stack()
+local function transaction(connection)
+  connection:execute('BEGIN')
+  return setmetatable({conn = connection}, transaction_metatable)
+end
+
+local s <close> = close_stack.new()
 local conn = s:push(db.connect())
-s:push(setmetatable({ conn = conn }, commit_guard_mt))
+s:push(transaction(conn))
 
 conn:execute('INSERT INTO ...')
 -- on normal exit: commit, then close conn
@@ -119,19 +124,21 @@ conn:execute('INSERT INTO ...')
 You can also pass an error explicitly to `close()`:
 
 ```lua
-local s <close> = close_stack()
+local s <close> = close_stack.new()
 s:push(resource)
 s:close(err)  -- closers receive err; it is re-raised after all closers run
 ```
 
+In this particular case, the effect is the same as just raising the error.
+
 ## API
 
-### `close_stack()`
+### `new()`
 
 Creates and returns a new close stack.
 
 ```lua
-local s <close> = close_stack()
+local s <close> = close_stack.new()
 ```
 
 ### `stack:push(closeable)`
@@ -146,6 +153,10 @@ nil.
 ```lua
 local f = s:push(io.open(path))  -- f may be nil if open failed
 ```
+
+It is your responsibility to ensure that you only pass a proper closeable value
+into the stack. A closer that throws an error is fine, but a non-closeable value
+will throw an error at close-time and make the stack leak its contents.
 
 ### `stack:callback(fn, ...)`
 
@@ -185,7 +196,7 @@ it receives the error object from Lua's scope-exit machinery and forwards it to
 all closers.
 
 ```lua
-local s <close> = close_stack()
+local s <close> = close_stack.new()
 ```
 
 ### `__newindex` guard
@@ -221,13 +232,15 @@ Notable differences between Lua versions:
   no error). This makes it impossible to distinguish between a normal close and
   an `error(nil)`.
 - In Lua 5.5, `__close` receives no error argument on normal close, and `nil`
-  errors are converted to strings. The ambiguity is resolved.
+  errors are converted to strings.
+
+For the sake of a sane implementation, we just treat a `nil` error as being
+no error.
 
 ## Design notes
 
-This is implemented via the actual Lua function stack — each entry gets its own
-stack frame with a `<close>` local. This decision was made because of the
-following requirements:
+This is implemented via the actual Lua function stack — each entry gets a
+`<close>` local. This decision was made because of the following requirements:
 
 * The incoming error must be passed into each closer, because some need to make
   decisions based on it (e.g. commit-or-rollback guards).
@@ -239,6 +252,10 @@ following requirements:
 The only way to reliably satisfy all three is to assign each value to a real
 to-be-closed variable and let Lua's built-in closing semantics handle error
 propagation.
+
+This does mean that the close stack depends on the user passing a proper
+auto-closeable object. If you violate this, the stack will throw an error on
+close, and leak parts of its stack.
 
 ### Limitations
 
