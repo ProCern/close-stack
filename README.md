@@ -90,6 +90,55 @@ If `setup` throws before reaching `pop_all`, the `<close>` on `s` ensures
 everything is cleaned up. Once `pop_all` is called, `s` is empty, so its scope
 exit is a no-op.
 
+### The keyed map
+
+In addition to the ordered stack, every close stack keeps a keyed map: a
+collection of closeables keyed by arbitrary keys, accessed through `map_set`,
+`map_get`, `map_pairs`, and `map_len`. This is handy when you want to register a
+closeable under a key you can look up later, rather than pushing it onto the
+ordered stack.
+
+```lua
+local s <close> = close_stack.new()
+
+s:map_set('database', db.connect())
+s:map_set(socket_fd, wrap_socket(socket_fd))
+
+-- reach back in and use them by key
+s:map_get('database'):query('...')
+
+-- everything in the map is closed when s is closed.
+```
+
+Map entries are **const once set**, mirroring the `<close>` values they become.
+Just as the ordered stack won't let you pull an individual item back out, the map
+won't let you reset or unset a key that already holds a real closeable — that
+would let you silently drop an owned resource. `map_set` on such a key raises an
+error:
+
+```lua
+s:map_set('database', db.connect())
+s:map_set('database', other) -- error: can not overwrite an existing map entry
+s:map_set('database', nil)   -- error: same — you can not unset it either
+```
+
+A `nil` (or `false`) value is not a real resource, so it is treated as "nothing
+to store": `map_set(key, nil)` on an empty key is a harmless no-op, and a key
+that only holds `false` may be freely overwritten (nothing is lost). `false`
+values are stored as-is and show up in `map_pairs`, consistent with Lua ignoring
+`nil`/`false` as to-be-closed values.
+
+The map is closed as the *deepest* layer of unwinding: all map values are closed
+before any of the ordered stack's values. Because a map is unordered, the
+closing order **among the map's own values is unspecified** — do not rely on it.
+If you need ordering between two resources, use `push`.
+
+Map values participate in error propagation exactly like stack values: they
+receive the in-flight error in their `__close` metamethod, and an error thrown by
+a map closer replaces the propagating error for everything closed afterward
+(i.e. the whole ordered stack). `pop_all` transfers the map along with the stack,
+and the map is emptied on close.
+
 ### Error handling
 
 When a close stack is used as a `<close>` variable, it receives the in-flight
@@ -170,6 +219,45 @@ Callbacks do not receive the error object. If you need error-aware cleanup, use
 s:callback(os.remove, tempfile)
 ```
 
+### `stack:map_set(key, closeable)`
+
+Stores a closeable in the keyed map under `key` and returns it. All map values
+are closed when the stack is closed, *before* any value on the ordered stack, in
+an **unspecified order**. The map is emptied on close and transferred by
+`pop_all`.
+
+Entries are const once set: if `key` already holds a real (truthy) closeable,
+`map_set` raises an error rather than overwriting or unsetting it. A `nil` or
+`false` value is treated as "nothing to store" — a no-op on an empty key, and
+allowed to overwrite a key that only holds a falsy value. `false` is stored as-is
+(and appears in `map_pairs`). A `nil` `key` raises an error.
+
+```lua
+stack:map_set('log', open_logfile(path))
+```
+
+### `stack:map_get(key)`
+
+Returns the closeable stored under `key`, or `nil` if there is none.
+
+### `stack:map_pairs()`
+
+Returns a stateful iterator yielding `(key, closeable)` pairs, for use in a
+generic `for` loop. The underlying table is not exposed, so the map can not be
+mutated through the iterator.
+
+```lua
+for key, closeable in stack:map_pairs() do
+  -- ...
+end
+```
+
+### `stack:map_len()`
+
+Returns `#` of the underlying map table. As with any Lua table, this is only a
+meaningful count for sequence (1..n integer) keys; for arbitrary keys, inspect
+the map the way you would any plain table (e.g. via `map_pairs`).
+
 ### `stack:close([err])`
 
 Closes the stack immediately, invoking all closers in reverse order. If `err` is
@@ -181,13 +269,16 @@ new items have been pushed since).
 
 ### `stack:pop_all()`
 
-Transfers all entries to a new close stack and returns it. The original stack
-becomes empty. The returned stack is a full close stack — it can be used as a
-`<close>` variable, closed manually, or have more items pushed onto it.
+Transfers all entries — both the ordered stack and the keyed `map` — to a new
+close stack and returns it. The original stack becomes empty. The returned stack
+is a full close stack — it can be used as a `<close>` variable, closed manually,
+or have more items pushed onto it.
 
 ### `#stack`
 
-Returns the number of entries currently in the stack.
+Returns the number of entries currently in the *ordered stack*. The keyed map is
+separate and does not contribute to this length; use `stack:map_len()` or
+`stack:map_pairs()` to inspect the map.
 
 ### Using as a `<close>` variable
 
@@ -205,8 +296,9 @@ Direct field assignment on a close stack raises an error. Use the methods above.
 
 ### `__gc` warning
 
-If a close stack is garbage collected while it still has entries (i.e. it was
-never closed), a warning is emitted via `warn()`.
+If a close stack is garbage collected while it still has entries in either the
+ordered stack or the keyed `map` (i.e. it was never closed), a warning is emitted
+via `warn()`.
 
 ## Closing semantics
 
@@ -256,6 +348,23 @@ propagation.
 This does mean that the close stack depends on the user passing a proper
 auto-closeable object. If you violate this, the stack will throw an error on
 close, and leak parts of its stack.
+
+The ordered stack is unwound 16 closers per function frame (an unrolling that
+raises the effective capacity and reduces recursion overhead). The keyed map is
+unwound the same way: because it is an unordered table rather than a sequence, it
+cannot be walked by index, so its unwinder threads a key through `next` and binds
+up to 16 values per frame to `<close>` locals, recursing on the key that follows
+the sixteenth. Slots past the end of the map receive `nil`, which Lua's
+to-be-closed machinery simply ignores. The map is unwound as the deepest layer,
+so its values close before the ordered stack's — and, being unordered, in no
+guaranteed order among themselves.
+
+The map is kept as private state and reached only through `map_set`/`map_get`/
+`map_pairs`/`map_len` rather than exposed as a raw table. This is deliberate: a
+`<close>` value is also `<const>`, and the whole close stack is built to honor
+that — you can add resources but never quietly remove an individual one. A public
+table would let a caller `delete` or overwrite an owned closeable and leak it, so
+`map_set` enforces the const-once-set rule instead.
 
 ### Limitations
 

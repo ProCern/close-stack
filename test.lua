@@ -512,6 +512,248 @@ test("original stack can be reused after pop_all", function()
 end)
 
 ----------------------------------------------------------------------
+print("\n--- map ---")
+
+-- Collect all (key, value) pairs from map_pairs into a plain table keyed by key.
+local function collect_pairs(s)
+  local out = {}
+  for k, v in s:map_pairs() do
+    out[k] = v
+  end
+  return out
+end
+
+test("new stack has an empty map", function()
+  local s <close> = close_stack.new()
+  assert_eq(s:map_len(), 0)
+  assert_eq(next(collect_pairs(s)), nil)
+  s:close()
+end)
+
+test("map values are closed on close", function()
+  local log = {}
+  local s <close> = close_stack.new()
+  s:map_set("a", recorder(log, "a"))
+  s:map_set(42, recorder(log, "b"))
+  s:map_set(recorder, recorder(log, "c"))
+  s:close()
+  assert_eq(#log, 3)
+  -- order is unspecified, so just check that every value fired.
+  local seen = {}
+  for _, entry in ipairs(log) do seen[entry.name] = true end
+  assert(seen.a and seen.b and seen.c, "all map values should be closed")
+end)
+
+test("map_set returns the closeable", function()
+  local s <close> = close_stack.new()
+  local obj = recorder({}, "x")
+  assert_eq(s:map_set("k", obj), obj)
+  s:close()
+end)
+
+test("map_get returns the stored closeable, or nil when absent", function()
+  local s <close> = close_stack.new()
+  local obj = recorder({}, "x")
+  s:map_set("k", obj)
+  assert_eq(s:map_get("k"), obj)
+  assert_eq(s:map_get("missing"), nil)
+  s:close()
+end)
+
+test("map_pairs yields the stored key/closeable pairs", function()
+  local s <close> = close_stack.new()
+  local a, b = recorder({}, "a"), recorder({}, "b")
+  s:map_set("x", a)
+  s:map_set("y", b)
+  local got = collect_pairs(s)
+  assert_eq(got.x, a)
+  assert_eq(got.y, b)
+  local n = 0
+  for _ in pairs(got) do n = n + 1 end
+  assert_eq(n, 2)
+  s:close()
+end)
+
+test("map_set errors when overwriting a truthy entry", function()
+  local s <close> = close_stack.new()
+  s:map_set("k", recorder({}, "a"))
+  local ok, err = pcall(function() s:map_set("k", recorder({}, "b")) end)
+  assert_eq(ok, false)
+  assert(tostring(err):find("overwrite an existing map entry"),
+    "expected overwrite error message")
+  s:close()
+end)
+
+test("map_set errors when unsetting a truthy entry with nil", function()
+  local s <close> = close_stack.new()
+  s:map_set("k", recorder({}, "a"))
+  local ok, err = pcall(function() s:map_set("k", nil) end)
+  assert_eq(ok, false)
+  assert(tostring(err):find("overwrite an existing map entry"),
+    "expected overwrite error message")
+  s:close()
+end)
+
+test("map_set(emptykey, nil) is a silent no-op", function()
+  local s <close> = close_stack.new()
+  s:map_set("k", nil) -- must not error, must not store
+  assert_eq(s:map_get("k"), nil)
+  assert_eq(next(collect_pairs(s)), nil)
+  s:close()
+end)
+
+test("map_set(nil, x) errors", function()
+  local s <close> = close_stack.new()
+  local ok, err = pcall(function() s:map_set(nil, recorder({}, "a")) end)
+  assert_eq(ok, false)
+  assert(tostring(err):find("map key can not be nil"),
+    "expected nil-key error message")
+  s:close()
+end)
+
+test("false values are stored, appear in map_pairs, and can be reset", function()
+  local log = {}
+  local s <close> = close_stack.new()
+  -- false is a no-op closeable; it is stored as-is and shows up in map_pairs.
+  s:map_set("k", false)
+  local got = collect_pairs(s)
+  assert_eq(got.k, false)
+  -- a falsy entry is not an owned resource, so it may be overwritten...
+  local real = recorder(log, "real")
+  assert_eq(s:map_set("k", real), real) -- no error
+  assert_eq(s:map_get("k"), real)
+  s:close()
+  assert_eq(#log, 1) -- only the real closeable ran
+  assert_eq(log[1].name, "real")
+end)
+
+test("a falsy entry can be cleared with nil", function()
+  local s <close> = close_stack.new()
+  s:map_set("k", false)
+  s:map_set("k", nil) -- allowed: old value was falsy
+  assert_eq(s:map_get("k"), nil)
+  s:close()
+end)
+
+test("map is emptied after close", function()
+  local s <close> = close_stack.new()
+  s:map_set("a", recorder({}, "a"))
+  s:close()
+  assert_eq(s:map_len(), 0)
+  assert_eq(next(collect_pairs(s)), nil)
+end)
+
+test("map values receive the error on error unwinding", function()
+  local log = {}
+  local sentinel = {}
+  pcall(function()
+    local s <close> = close_stack.new()
+    s:map_set("a", recorder(log, "a"))
+    s:map_set("b", recorder(log, "b"))
+    s:close(sentinel)
+  end)
+  assert_eq(#log, 2)
+  for _, entry in ipairs(log) do
+    assert_eq(entry.err, sentinel,
+      string.format("map value %s should see sentinel", entry.name))
+  end
+end)
+
+test("map values close before stack values", function()
+  local log = {}
+  local s <close> = close_stack.new()
+  s:push(recorder(log, "stack"))
+  s:map_set("m", recorder(log, "map"))
+  s:close()
+  assert_eq(#log, 2)
+  -- the map is the deepest layer, so its values close first.
+  assert_eq(log[1].name, "map")
+  assert_eq(log[2].name, "stack")
+end)
+
+test("map supports arbitrary key types including false", function()
+  local log = {}
+  local s <close> = close_stack.new()
+  s:map_set(false, recorder(log, "false-key"))
+  s:map_set(true, recorder(log, "true-key"))
+  s:close()
+  assert_eq(#log, 2)
+  local seen = {}
+  for _, entry in ipairs(log) do seen[entry.name] = true end
+  assert(seen["false-key"] and seen["true-key"],
+    "both false-keyed and true-keyed values should close")
+end)
+
+test("many map values all close", function()
+  local log = {}
+  local s <close> = close_stack.new()
+  for i = 1, 100 do
+    s:map_set("key-" .. i, recorder(log, i))
+  end
+  s:close()
+  assert_eq(#log, 100)
+  local seen = {}
+  for _, entry in ipairs(log) do seen[entry.name] = true end
+  for i = 1, 100 do
+    assert(seen[i], string.format("map value %d should close", i))
+  end
+end)
+
+test("map_len reflects # on integer keys", function()
+  local s <close> = close_stack.new()
+  for i = 1, 5 do
+    s:map_set(i, recorder({}, i))
+  end
+  assert_eq(s:map_len(), 5)
+  s:close()
+end)
+
+test("empty map with error re-raises it", function()
+  local sentinel = {}
+  local ok, err = pcall(function()
+    local s <close> = close_stack.new()
+    s:map_set("a", recorder({}, "a"))
+    s:close() -- drains the map
+    s:close(sentinel) -- now empty; must still re-raise
+  end)
+  assert_eq(ok, false)
+  assert_eq(err, sentinel)
+end)
+
+test("a thrower in the map propagates to stack closers", function()
+  local log = {}
+  local thrown = {}
+  local ok, err = pcall(function()
+    local s <close> = close_stack.new()
+    s:push(recorder(log, "stack"))
+    s:map_set("t", thrower(log, "map-thrower", thrown))
+    s:close()
+  end)
+  assert_eq(ok, false)
+  assert_eq(err, thrown)
+  -- the map thrower fires first (deepest), with nil error...
+  assert_eq(log[1].name, "map-thrower")
+  assert_eq(log[1].err, nil)
+  -- ...then the stack closer sees the replacement error.
+  assert_eq(log[2].name, "stack")
+  assert_eq(log[2].err, thrown)
+end)
+
+test("map values transfer with pop_all", function()
+  local log = {}
+  local s <close> = close_stack.new()
+  s:map_set("a", recorder(log, "a"))
+  local s2 = s:pop_all()
+  assert_eq(s:map_len(), 0) -- original map emptied
+  assert_eq(next(collect_pairs(s)), nil)
+  s:close()
+  assert_eq(#log, 0) -- nothing left on the original
+  s2:close()
+  assert_eq(#log, 1)
+  assert_eq(log[1].name, "a")
+end)
+
+----------------------------------------------------------------------
 print("\n--- as <close> variable ---")
 
 test("close stack as <close> fires closers on scope exit", function()
