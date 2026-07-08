@@ -1,4 +1,5 @@
 local callback_closer = require 'close-stack._callback-closer'
+local make_map_proxy = require 'close-stack._map-proxy'
 
 local M <const> = {}
 
@@ -6,6 +7,7 @@ local M <const> = {}
 --- @operator len(): integer
 --- @field private _stack any[]
 --- @field private _map {[any]: any}
+--- @field map {[any]: any} Public table-like proxy over the keyed map. Index, assign, `#`, and `pairs` all route through the `map_set`/`map_get`/`map_len`/`map_pairs` methods, so it inherits their const-once-set guarantee.
 local methods <const> = {}
 
 --- @class close-stack.CloseStack
@@ -217,6 +219,7 @@ function methods:pop_all()
     _stack = self._stack,
     _map = self._map,
   }, metatable)
+  rawset(new, 'map', make_map_proxy(new))
   self._stack = {}
   self._map = {}
   return new
@@ -225,10 +228,13 @@ end
 --- Create a new close stack.
 --- @return close-stack.CloseStack
 function M.new()
-  return setmetatable({
+  local self <const> = setmetatable({
     _stack = {},
     _map = {},
   }, metatable)
+  -- rawset bypasses the __newindex guard; the proxy is trusted internal state.
+  rawset(self, 'map', make_map_proxy(self))
+  return self
 end
 
 M.close_stack = M.new

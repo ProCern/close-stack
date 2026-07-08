@@ -754,6 +754,119 @@ test("map values transfer with pop_all", function()
 end)
 
 ----------------------------------------------------------------------
+print("\n--- map proxy ---")
+
+test("proxy assignment stores and closes the value", function()
+  local log = {}
+  local s <close> = close_stack.new()
+  s.map["a"] = recorder(log, "a")
+  s.map[42] = recorder(log, "b")
+  assert_eq(s:map_get("a"), s.map["a"]) -- proxy read matches method read
+  s:close()
+  assert_eq(#log, 2)
+end)
+
+test("proxy read returns the closeable, nil when absent", function()
+  local s <close> = close_stack.new()
+  local obj = recorder({}, "x")
+  s.map["k"] = obj
+  assert_eq(s.map["k"], obj)
+  assert_eq(s.map["missing"], nil)
+  s:close()
+end)
+
+test("proxy and methods interoperate", function()
+  local s <close> = close_stack.new()
+  local a, b = recorder({}, "a"), recorder({}, "b")
+  s:map_set("viamethod", a) -- set via method...
+  assert_eq(s.map["viamethod"], a) -- ...read via proxy
+  s.map["viaproxy"] = b -- set via proxy...
+  assert_eq(s:map_get("viaproxy"), b) -- ...read via method
+  s:close()
+end)
+
+test("#proxy reports the map length", function()
+  local s <close> = close_stack.new()
+  for i = 1, 5 do
+    s.map[i] = recorder({}, i)
+  end
+  assert_eq(#s.map, 5)
+  assert_eq(#s.map, s:map_len())
+  s:close()
+end)
+
+test("pairs(proxy) iterates key/closeable pairs", function()
+  local s <close> = close_stack.new()
+  local a, b = recorder({}, "a"), recorder({}, "b")
+  s.map["x"] = a
+  s.map["y"] = b
+  local got = {}
+  local n = 0
+  for k, v in pairs(s.map) do
+    got[k] = v
+    n = n + 1
+  end
+  assert_eq(n, 2)
+  assert_eq(got.x, a)
+  assert_eq(got.y, b)
+  s:close()
+end)
+
+test("proxy assignment enforces const-once-set", function()
+  local s <close> = close_stack.new()
+  s.map["k"] = recorder({}, "a")
+  local ok, err = pcall(function() s.map["k"] = recorder({}, "b") end)
+  assert_eq(ok, false)
+  assert(tostring(err):find("overwrite an existing map entry"),
+    "expected overwrite error through the proxy")
+  s:close()
+end)
+
+test("proxy assignment of nil to a truthy key errors", function()
+  local s <close> = close_stack.new()
+  s.map["k"] = recorder({}, "a")
+  local ok = pcall(function() s.map["k"] = nil end)
+  assert_eq(ok, false)
+  s:close()
+end)
+
+test("proxy assignment of nil to an empty key is a no-op", function()
+  local s <close> = close_stack.new()
+  s.map["k"] = nil -- must not error
+  assert_eq(s.map["k"], nil)
+  assert_eq(#s.map, 0)
+  s:close()
+end)
+
+test("proxy stores false, shows it in pairs, and allows reset", function()
+  local s <close> = close_stack.new()
+  s.map["k"] = false
+  local got = {}
+  for k, v in pairs(s.map) do got[k] = v end
+  assert_eq(got.k, false)
+  local real = recorder({}, "real")
+  s.map["k"] = real -- falsy entry may be overwritten
+  assert_eq(s.map["k"], real)
+  s:close()
+end)
+
+test("proxy works on a stack from pop_all", function()
+  local log = {}
+  local s <close> = close_stack.new()
+  s.map["a"] = recorder(log, "a")
+  local s2 <close> = s:pop_all()
+  -- original proxy now operates on a fresh empty map
+  assert_eq(#s.map, 0)
+  assert_eq(s.map["a"], nil)
+  -- transferred entry is reachable through the new stack's proxy
+  local seen
+  for k in pairs(s2.map) do seen = k end
+  assert_eq(seen, "a")
+  s2:close()
+  assert_eq(#log, 1)
+end)
+
+----------------------------------------------------------------------
 print("\n--- as <close> variable ---")
 
 test("close stack as <close> fires closers on scope exit", function()

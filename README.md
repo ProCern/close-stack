@@ -93,40 +93,61 @@ exit is a no-op.
 ### The keyed map
 
 In addition to the ordered stack, every close stack keeps a keyed map: a
-collection of closeables keyed by arbitrary keys, accessed through `map_set`,
-`map_get`, `map_pairs`, and `map_len`. This is handy when you want to register a
-closeable under a key you can look up later, rather than pushing it onto the
-ordered stack.
+collection of closeables keyed by arbitrary keys. This is handy when you want to
+register a closeable under a key you can look up later, rather than pushing it
+onto the ordered stack.
+
+The most convenient way to use it is the public `map` field, a table-like proxy
+you can index, assign, `#`, and `pairs` over just like a plain table:
 
 ```lua
 local s <close> = close_stack.new()
 
-s:map_set('database', db.connect())
-s:map_set(socket_fd, wrap_socket(socket_fd))
+s.map.database = db.connect()
+s.map[socket_fd] = wrap_socket(socket_fd)
 
 -- reach back in and use them by key
-s:map_get('database'):query('...')
+s.map.database:query('...')
+
+for key, closeable in pairs(s.map) do
+  -- ...
+end
 
 -- everything in the map is closed when s is closed.
+```
+
+The proxy is a thin view over four methods, which you can also call directly if
+you prefer: `map_set`, `map_get`, `map_pairs`, and `map_len`. `s.map.k = v` is
+`s:map_set('k', v)`, `s.map.k` is `s:map_get('k')`, `#s.map` is `s:map_len()`,
+and `pairs(s.map)` is `s:map_pairs()`.
+
+```lua
+s:map_set('database', db.connect())
+s:map_get('database'):query('...')
 ```
 
 Map entries are **const once set**, mirroring the `<close>` values they become.
 Just as the ordered stack won't let you pull an individual item back out, the map
 won't let you reset or unset a key that already holds a real closeable — that
-would let you silently drop an owned resource. `map_set` on such a key raises an
-error:
+would let you silently drop an owned resource. Assigning (or calling `map_set`)
+over such a key raises an error:
 
 ```lua
-s:map_set('database', db.connect())
-s:map_set('database', other) -- error: can not overwrite an existing map entry
-s:map_set('database', nil)   -- error: same — you can not unset it either
+s.map.database = db.connect()
+s.map.database = other -- error: can not overwrite an existing map entry
+s.map.database = nil   -- error: same — you can not unset it either
 ```
 
 A `nil` (or `false`) value is not a real resource, so it is treated as "nothing
-to store": `map_set(key, nil)` on an empty key is a harmless no-op, and a key
-that only holds `false` may be freely overwritten (nothing is lost). `false`
-values are stored as-is and show up in `map_pairs`, consistent with Lua ignoring
+to store": assigning `nil` to an empty key is a harmless no-op, and a key that
+only holds `false` may be freely overwritten (nothing is lost). `false` values
+are stored as-is and show up in iteration, consistent with Lua ignoring
 `nil`/`false` as to-be-closed values.
+
+Because the proxy routes everything through those methods, it inherits all of
+this behavior — there is no back door. It only supports data access (index,
+assign, `#`, `pairs`); the `map_*` methods live on the close stack itself, not on
+the proxy.
 
 The map is closed as the *deepest* layer of unwinding: all map values are closed
 before any of the ordered stack's values. Because a map is unordered, the
@@ -217,6 +238,28 @@ Callbacks do not receive the error object. If you need error-aware cleanup, use
 
 ```lua
 s:callback(os.remove, tempfile)
+```
+
+### `stack.map`
+
+A public table-like proxy over the keyed map. Index, assign, `#`, and `pairs`
+all route through the four `map_*` methods below:
+
+| proxy expression        | equivalent method call |
+| ----------------------- | ---------------------- |
+| `stack.map[k]`          | `stack:map_get(k)`     |
+| `stack.map[k] = v`      | `stack:map_set(k, v)`  |
+| `#stack.map`            | `stack:map_len()`      |
+| `pairs(stack.map)`      | `stack:map_pairs()`    |
+
+Because it delegates, it inherits the const-once-set behavior — there is no way
+to overwrite or unset an owned closeable through the proxy either. It supports
+only data access; the methods themselves are not reachable through it (e.g.
+`stack.map.map_get` just reads the key `'map_get'`).
+
+```lua
+stack.map.log = open_logfile(path)
+for key, closeable in pairs(stack.map) do end
 ```
 
 ### `stack:map_set(key, closeable)`
@@ -359,12 +402,20 @@ to-be-closed machinery simply ignores. The map is unwound as the deepest layer,
 so its values close before the ordered stack's — and, being unordered, in no
 guaranteed order among themselves.
 
-The map is kept as private state and reached only through `map_set`/`map_get`/
-`map_pairs`/`map_len` rather than exposed as a raw table. This is deliberate: a
-`<close>` value is also `<const>`, and the whole close stack is built to honor
-that — you can add resources but never quietly remove an individual one. A public
-table would let a caller `delete` or overwrite an owned closeable and leak it, so
+The map is kept as private state reached only through `map_set`/`map_get`/
+`map_pairs`/`map_len`, never as a raw table. This is deliberate: a `<close>`
+value is also `<const>`, and the whole close stack is built to honor that — you
+can add resources but never quietly remove an individual one. A raw public table
+would let a caller `delete` or overwrite an owned closeable and leak it, so
 `map_set` enforces the const-once-set rule instead.
+
+The public `stack.map` field is a proxy (see `src/close-stack/_map-proxy.lua`),
+not the underlying table: a small table carrying a backreference to its owning
+stack under a module-private key, with a metatable whose `__index`/`__newindex`/
+`__len`/`__pairs` forward to the methods above. Since every operation goes
+through `map_set`/`map_get`/etc., the ergonomic table syntax gets the exact same
+guarantees as the methods, with no back door. `pairs` support relies on the
+`__pairs` metamethod, which Lua 5.4 still honors.
 
 ### Limitations
 
